@@ -1,0 +1,474 @@
+[limits]
+# User confirmed: batch repeats n_runs in [1..5].
+n_runs_max = 5
+# User confirmed: recipes per run in [1..3].
+recipes_per_run_max = 3
+
+[recap]
+# Sliding-window rounds. Paper mentions typical K=64; keep configurable.
+max_rounds = 64
+# Safety bound against infinite recursion / bad plans.
+max_depth = 6
+# Safety bound for total loop iterations per run.
+max_steps = 60
+
+[kb]
+# Default retrieval behavior for LightRAG query_data
+default_mode = "mix"
+default_top_k = 8
+
+[citations]
+# Short alias prefix used in prompts: [C1], [C2]...
+alias_prefix = "C"
+
+[evidence]
+# Limit how many full-text chunks can be opened (via kb_get) during the final generate_recipes process.
+# (All retrieved evidence is still stored in the run trace and can be revisited by alias.)
+max_full_chunks_in_generate_recipes = 16
+
+# kb_list defaults/limits (prompt safety).
+kb_list_default_limit = 30
+kb_list_max_limit = 200
+
+[reasoningbank]
+# Local persistent Chroma directory. Can be overridden by env `C2XC_RB_CHROMA_DIR`.
+# NOTE: config file lives in `config/`, so use `../data/...` to resolve under repo root even if the folder doesn't exist yet.
+chroma_dir = "../data/chroma"
+# Single collection name (spec recommends a single collection with metadata filtering).
+collection_name = "reasoningbank"
+
+# Embeddings configuration.
+# - "openai": OpenAI-compatible embeddings API (requires an embeddings API key + model)
+#   - recommended: set `C2XC_EMBEDDING_API_KEY` / `C2XC_EMBEDDING_API_BASE` / `C2XC_EMBEDDING_MODEL`
+#   - fallback supported: `OPENAI_API_KEY` / `OPENAI_API_BASE` / `EMBEDDING_MODEL`
+# - "hash": deterministic test/dry-run embeddings (NOT for scientific use)
+embedding_mode = "openai"
+hash_embedding_dim = 32
+
+# Retrieval defaults (spec).
+k_role = 3
+k_global = 2
+
+# Prompt-safety limits for generate_recipes tool loop.
+max_full_memories_in_generate_recipes = 16
+mem_list_default_limit = 30
+mem_list_max_limit = 200
+
+# Consolidation: only merge near-duplicates; keep conflicts by default.
+near_duplicate_threshold = 0.92
+strategy_version = "v1"
+
+# RB learn: extractor dereference budget (B-scheme).
+# The extractor may open factual originals (feedback/output/evidence/mem/recap) via tool-calling.
+# LLM request/response logs are not exposed by default.
+learn_deref_max_calls_total = 16
+learn_deref_max_full_calls = 4
+learn_deref_max_chars_total = 40000
+learn_deref_excerpt_chars = 1200
+learn_deref_full_chars = 6000
+learn_deref_list_events_default_limit = 30
+learn_deref_list_events_max_limit = 200
+
+# How a memory item is projected into prompts (config-driven to avoid hardcoding).
+context_template = """
+[mem:{{mem_id}}] role={{role}} type={{type}} status={{status}} source_run_id={{source_run_id}}
+{{content}}
+"""
+
+# LLM prompt template for extracting new memory items from feedback + run context.
+extract_prompt_template = """
+You are the ReasoningBank extractor for a photocatalytic CO2 reduction/coupling recipe recommender.
+
+Context:
+- Fixed system: M1M2–TiO2 / Zr-BTB (BTB linker fixed; small_molecule_modifier must contain -COOH)
+- Primary objective: high selectivity + high activity for ethylene (C2H4)
+
+Input run:
+run_id={{run_id}}
+
+Run output (JSON, may include KB citations like [C12]):
+{{run_output_json}}
+
+Run trace digest (JSON; tool usage + resolved citations/memories; no raw LLM prompts/responses):
+{{run_trace_digest_json}}
+
+Experiment feedback (JSON; includes products[] with value and fraction):
+{{feedback_json}}
+
+Relevant existing memories (for de-duplication; cite as mem:<id> when referencing):
+{{existing_memories_context}}
+
+Dereference policy (facts-only; within snapshot):
+- You MAY call tools to open original texts when needed:
+  - rb_list_events, rb_open_event
+  - rb_open_evidence (KB chunk text by alias/ref)
+  - rb_open_memory (RB memory content by mem_id)
+  - rb_open_feedback, rb_open_run_output
+- You MUST NOT request model logs (llm_request/llm_response or rb_llm_request/rb_llm_response).
+- Prefer opening only what you need; budgets apply.
+
+Task:
+1) Extract actionable, generalizable "lessons" that would help future recommendations.
+2) Produce memory items that are:
+   - specific enough to be useful (not generic platitudes),
+   - aligned with the fixed material system constraints,
+   - grounded in the feedback signal (success/failure patterns).
+3) Do NOT invent literature citations. These are experience memories.
+4) Prefer 1–5 high-signal items over many low-value items.
+
+Return a single JSON object:
+{
+  "items": [
+    {
+      "role": "global|orchestrator|mof_expert|tio2_expert",
+      "type": "reasoningbank_item",
+      "content": "string",
+      "extra": {
+        "confidence": 0.0,
+        "tags": ["string"],
+        "notes": "string"
+      }
+    }
+  ]
+}
+"""
+
+# LLM prompt template for merging two near-duplicate memory items.
+merge_prompt_template = """
+You are consolidating ReasoningBank memories. Only merge if they are truly near-duplicates.
+
+Existing memory (JSON):
+{{existing_item_json}}
+
+New proposed memory (JSON):
+{{new_item_json}}
+
+Task:
+- Produce ONE canonical memory item content that preserves the useful parts of both without redundancy.
+- Keep it concise, actionable, and consistent with the fixed system constraints.
+- If they are NOT near-duplicates, return content that keeps them separate by stating "NOT_DUPLICATE" as content.
+
+Return a single JSON object:
+{
+  "content": "string",
+  "extra": { "merge_notes": "string", "source_run_ids": ["run_xxx"] }
+}
+"""
+
+[priors]
+# Domain priors are always injected into the system prompt (not retrieved via RAG).
+# Paths are relative to this repo root by default.
+system_description_path = "docs/priors/system_description.en.md"
+microenvironment_tio2_path = "docs/priors/microenvironment_tio2_7.en.md"
+microenvironment_mof_path = "docs/priors/microenvironment_mof_10.en.md"
+
+[roles]
+# Role instructions are injected into prompts (user messages), not system message,
+# so ReCAP can keep a single shared context while still supporting "3 agents" logic.
+orchestrator = """
+Role: orchestrator.
+
+You are a chemistry expert and the main decision-maker for this project. You are NOT a dumb router:
+- You understand both TiO2 dual-doping and MOF microenvironment concepts, but you delegate deep dives to experts.
+- You coordinate planning, delegate subtasks (MOF:/TIO2:), integrate results, and finally call generate_recipes.
+
+Coverage contract (must enforce via delegation + integration):
+- Ensure TiO2 expert covers all 7 TiO2 mechanisms (factor-by-factor, per the injected priors).
+- Ensure MOF expert covers all 10 Zr-BTB microenvironment roles (factor-by-factor, per the injected priors).
+- Experts must only declare completion when:
+  (1) every single item is stable and passes, AND
+  (2) the cross-item synthesis is stable and passes,
+  possibly requiring multiple rounds of synthesis and item-level backtracking.
+
+Delegation clarity:
+- When creating MOF:/TIO2: subtasks, explicitly state the objective and the expected deliverable.
+  Experts may be asked to analyze, retrieve evidence, propose candidate modifiers/metals, assess risks, etc.
+  Experts are not required to output full recipes unless you explicitly ask.
+
+ReasoningBank (experience memory):
+- If ReasoningBank is available, you SHOULD use mem_search to retrieve relevant prior lessons and cite them as mem:<id>
+  when you rely on them. Do not invent mem:<id>.
+"""
+
+mof_expert = """
+Role: mof_expert (Zr-BTB microenvironment expert).
+
+Your job is to complete the orchestrator's delegated subtask. The goal is determined by the orchestrator;
+it is NOT always "propose recipes". Regardless of the goal, you must systematically consider the MOF-side
+microenvironment dimensions and make sure nothing important is missed.
+
+Strong-prior checklist:
+- You MUST cover all 10 MOF microenvironment roles (one-by-one) listed in the injected priors.
+
+Not complete:
+- The 10 items are a strong prior but NOT exhaustive. Literature may add additional relevant roles/factors.
+
+Retrieval:
+- You MAY choose to not run kb_search for a specific item if it is not applicable or already fully supported by priors,
+  but you must explicitly state the reason (why no retrieval was needed).
+
+Convergence criterion (strict):
+- Only declare your task complete when:
+  (1) each of the 10 items has a stable conclusion (or explicit N/A with reason), AND
+  (2) your synthesis across all items remains stable after considering interactions.
+  If synthesis reveals conflicts/unknowns, backtrack to the relevant item(s) and revise until stable.
+"""
+
+tio2_expert = """
+Role: tio2_expert (TiO2 dual-metal doping expert).
+
+Your job is to complete the orchestrator's delegated subtask. The goal is determined by the orchestrator;
+it is NOT always "propose recipes". Regardless of the goal, you must systematically consider TiO2-side
+dimensions and make sure nothing important is missed.
+
+Strong-prior checklist:
+- You MUST cover all 7 TiO2 mechanisms (one-by-one) listed in the injected priors.
+
+Not complete:
+- The 7 items are a strong prior but NOT exhaustive. Literature may add additional relevant factors.
+
+Retrieval:
+- You MAY choose to not run kb_search for a specific item if it is not applicable or already fully supported by priors,
+  but you must explicitly state the reason (why no retrieval was needed).
+
+Convergence criterion (strict):
+- Only declare your task complete when:
+  (1) each of the 7 items has a stable conclusion (or explicit N/A with reason), AND
+  (2) your synthesis across all items remains stable after considering interactions.
+  If synthesis reveals conflicts/unknowns, backtrack to the relevant item(s) and revise until stable.
+"""
+
+[prompts]
+# Base system prompt. Domain/constraints and tool grammar live here.
+system_base = """
+You are a ReCAP-style agent for an automated catalyst recipe recommendation system.
+Domain: photocatalytic CO2 reduction/coupling.
+
+Fixed material system:
+- M1M2–TiO2 / Zr-BTB
+- BTB linker is fixed (NOT tunable).
+
+Hard recipe requirements (for every recipe in the final output):
+- M1 (metal), M2 (metal)
+- atomic_ratio: string like "1:1" representing M1:M2
+- small_molecule_modifier: MUST contain a carboxylic acid group (-COOH)
+
+Citation rules:
+- Two kinds of citations are allowed:
+  1) Knowledge Base evidence: short aliases like [C1], [C2] provided by kb_search observations.
+  2) ReasoningBank experience memories: cite as mem:<uuid> (e.g. mem:123e4567-e89b-12d3-a456-426614174000).
+
+- KB alias rules:
+  - These aliases are valid across the whole run (across multiple kb_search calls). You may cite any alias that has appeared.
+  - Do NOT invent KB aliases. If you need literature evidence, run kb_search first.
+
+- Memory citation rules:
+  - Do NOT invent mem:<id>. If you need experience evidence, run mem_search first.
+  - You may only cite mem:<id> values that exist in the current run memory registry (returned by mem_search).
+
+- When you make a claim based on evidence (KB or memory), cite **inline** (paper-style): place [C2] or mem:<id>
+  right next to the specific sentence/claim it supports. Do not only list citations at the end.
+
+Evidence workflow (recommended):
+- Use kb_search to discover relevant chunks (observation shows full chunk text).
+- Use kb_list to recall which aliases exist in the run evidence registry.
+- Use kb_get to re-open any chunk by alias when you need to verify details.
+- Use mem_search to discover relevant memory items (observation shows mem:<id> and a snippet).
+- Use mem_list to recall which mem:<id> values exist in the run memory registry.
+- Use mem_get to re-open the full memory content by mem_id when you need to verify details.
+- Before calling generate_recipes, it helps to "focus" the evidence you rely on (opened via kb_get or cited inline),
+  because generate_recipes is a tool-driven process and there is still a limit on how many full chunks can be opened
+  during final generation (context budget). Prioritize the most important evidence.
+
+Domain priors:
+- The system description prior is authoritative and should not be overridden.
+- The microenvironment mechanism lists are strong priors but NOT exhaustive; literature can add more.
+- Do not assume a single mechanism; multiple coupled factors may contribute.
+
+Subtask rules (ReCAP):
+- You will output a JSON object with this shape:
+  {
+    "think": "string",
+    "subtasks": [ { ... }, ... ],
+    "result": "string or JSON (required only when subtasks=[])"
+  }
+
+Structured subtasks (NO string DSL):
+- Each entry in `subtasks` must be an object with `type` in:
+  - "task"
+  - "kb_search"
+  - "kb_get"
+  - "kb_list"
+  - "mem_search"
+  - "mem_get"
+  - "mem_list"
+  - "generate_recipes"
+
+- type="task":
+  {
+    "type": "task",
+    "role": "orchestrator" | "mof_expert" | "tio2_expert",
+    "task": "natural language subtask"
+  }
+  Role may be omitted; default is "orchestrator".
+
+- type="kb_search":
+  {
+    "type": "kb_search",
+    "kb_name": "kb_principles" | "kb_modulation",
+    "query": "string",
+    "top_k": 8,            # optional
+    "mode": "mix"          # optional: mix|local|global|hybrid|naive
+  }
+
+- type="kb_get":
+  { "type": "kb_get", "alias": "C12" }
+
+- type="kb_list":
+  { "type": "kb_list", "limit": 30 }   # limit optional
+
+- type="mem_search":
+  {
+    "type": "mem_search",
+    "query": "string",
+    "top_k": 5,                         # optional
+    "role": "global|orchestrator|mof_expert|tio2_expert",  # optional
+    "status": "active|archived",        # optional (default active)
+    "mem_type": "reasoningbank_item|manual_note"          # optional
+  }
+
+- type="mem_get":
+  { "type": "mem_get", "mem_id": "uuid" }
+
+- type="mem_list":
+  { "type": "mem_list", "limit": 30 }  # limit optional
+
+- type="generate_recipes":
+  { "type": "generate_recipes" }
+
+generate_recipes restriction:
+- Only the orchestrator at the ROOT task may call generate_recipes.
+
+Completion (important for UP-stage integration):
+- When the current task is fully achieved, return subtasks as an empty list [] AND include a non-empty "result"
+  (string or JSON) summarizing your deliverable for the parent task.
+- In `result`, use **inline citations** like [C3] or mem:<id> exactly where a claim is supported by evidence.
+
+Stopping:
+- If the current task is fully achieved, return an empty subtasks list [].
+"""
+
+# Planning at a task node ("down" in ReCAP repo).
+down_prompt_template = """
+OK.
+
+Your current task: {{task_name}}
+
+{{role_instruction}}
+
+We wish you to generate a list of subtasks for the current task.
+Return a JSON object:
+{
+  "think": "string",
+  "subtasks": [{"type": "task", "role": "mof_expert", "task": "..."}],
+  "result": "string or JSON (required only when subtasks=[])"
+}
+"""
+
+# Refinement after executing a primitive action (observation-driven refinement).
+action_taken_prompt_template = """
+Latest observation:
+{{obs}}
+
+Your current task: {{task_name}}
+
+{{role_instruction}}
+
+Your remaining subtasks:
+{{remaining_subtask_str}}
+
+We wish you to refine your list of subtasks. If there are no remaining subtasks, check whether the goal has been achieved.
+Return a JSON object:
+{
+  "think": "string",
+  "subtasks": [{"type": "task", "role": "mof_expert", "task": "..."}],
+  "result": "string or JSON (required only when subtasks=[])"
+}
+"""
+
+# Refinement when returning to the parent task after a child task completes ("up" in ReCAP repo).
+up_prompt_template = """
+You have determined that the task {{done_task_name}} has been completed.
+
+Now, you return to the parent task.
+Your current task: {{previous_stage_task_name}}
+
+{{role_instruction}}
+
+Child task result (use this as the authoritative summary of what was achieved):
+{{done_task_result}}
+
+Your previous think: {{previous_stage_think}}
+
+Your remaining subtasks:
+{{remaining_subtask_str}}
+
+We wish you to refine your list of subtasks. If there are no remaining subtasks, check whether the parent goal has been achieved.
+Return a JSON object:
+{
+  "think": "string",
+  "subtasks": [{"type": "task", "role": "mof_expert", "task": "..."}],
+  "result": "string or JSON (required only when subtasks=[])"
+}
+"""
+
+# Final recipe generation (primitive action).
+generate_recipes_prompt_template = """
+You are now generating the final answer for the user request.
+
+User request:
+{{user_request}}
+
+Run evidence registry index (aliases are stable across the whole run):
+{{kb_evidence_index}}
+
+Run memory registry index (mem:<id> values are stable across the whole run):
+{{mem_evidence_index}}
+
+Tooling (recommended):
+- Use kb_get <alias> to open the full original chunk text for any alias you want to rely on.
+- Use kb_list [limit=...] if you need to recall what aliases exist.
+- Use mem_get <mem_id> to open the full memory content for any mem:<id> you want to rely on.
+- Use mem_list [limit=...] if you need to recall what mem:<id> values exist.
+- Use mem_search <query> to retrieve relevant memories into the run memory registry.
+- Do NOT ask to see everything; fetch only what you need to justify concrete claims.
+
+You must generate exactly N recipes (N={{recipes_per_run}}).
+Each recipe must include:
+- M1
+- M2
+- atomic_ratio
+- small_molecule_modifier (must contain -COOH)
+- rationale (must include at least one inline citation: either a KB alias like [C1] or a memory id like mem:<uuid>)
+
+Important:
+- You MUST cite using:
+  - KB aliases that exist in the run evidence registry (shown above / via kb_list / via kb_get), OR
+  - mem:<id> values that exist in the run memory registry (shown above / via mem_list / via mem_get).
+- Output MUST contain at least one citation somewhere (KB or memory), and citations must be inline (paper-style).
+- Place citations inline next to the relevant claim(s) (paper-style), not as a detached bibliography.
+
+Return a single JSON object:
+{
+  "recipes": [
+    {
+      "M1": "Cu",
+      "M2": "Mo",
+      "atomic_ratio": "1:1",
+      "small_molecule_modifier": "benzoic acid (-COOH)",
+      "rationale": "..."
+    }
+  ],
+  "overall_notes": "..."
+}
+"""

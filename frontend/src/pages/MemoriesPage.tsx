@@ -1,0 +1,252 @@
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ApiError } from '../api/client'
+import { createMemory, listMemories } from '../api/c2xc'
+import type { MemoryItem } from '../api/types'
+import { useT } from '../i18n/i18n'
+
+type RoleFilter = 'all' | 'global' | 'orchestrator' | 'mof_expert' | 'tio2_expert'
+type StatusFilter = 'all' | 'active' | 'archived'
+type TypeFilter = 'all' | 'reasoningbank_item' | 'manual_note'
+
+function formatTs(ts: number | null): string {
+  if (!ts) return '—'
+  try {
+    return new Date(ts * 1000).toLocaleString()
+  } catch {
+    return String(ts)
+  }
+}
+
+function snippet(text: string, n: number): string {
+  const s = (text ?? '').replace(/\s+/g, ' ').trim()
+  if (s.length <= n) return s
+  return `${s.slice(0, n)}…`
+}
+
+export function MemoriesPage() {
+  const t = useT()
+  const queryClient = useQueryClient()
+
+  const [q, setQ] = useState('')
+  const [role, setRole] = useState<RoleFilter>('all')
+  const [status, setStatus] = useState<StatusFilter>('active')
+  const [type, setType] = useState<TypeFilter>('all')
+
+  const [newRole, setNewRole] = useState<'global' | 'orchestrator' | 'mof_expert' | 'tio2_expert'>(
+    'global',
+  )
+  const [newContent, setNewContent] = useState('')
+
+  const queryKey = useMemo(() => ['memories', q.trim(), role, status, type], [q, role, status, type])
+
+  const memoriesQuery = useInfiniteQuery({
+    queryKey,
+    queryFn: ({ pageParam }: { pageParam: string | null }) =>
+      listMemories({
+        query: q.trim() ? q.trim() : undefined,
+        role: role === 'all' ? undefined : [role],
+        status: status === 'all' ? undefined : [status],
+        type: type === 'all' ? undefined : [type],
+        limit: 50,
+        cursor: pageParam,
+      }),
+    initialPageParam: null,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
+  })
+
+  const createMutation = useMutation({
+    mutationFn: () => createMemory({ role: newRole, content: newContent.trim() }),
+    onSuccess: () => {
+      setNewContent('')
+      queryClient.invalidateQueries({ queryKey: ['memories'] })
+    },
+  })
+
+  const items = useMemo(() => {
+    const pages = memoriesQuery.data?.pages ?? []
+    const out: MemoryItem[] = []
+    for (const p of pages) out.push(...(p.items ?? []))
+    return out
+  }, [memoriesQuery.data?.pages])
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-lg font-semibold">{t('nav.memories')}</div>
+          <Link to="/" className="text-xs text-muted hover:text-fg">
+            {t('nav.runs')}
+          </Link>
+          <Link to="/settings/products" className="text-xs text-muted hover:text-fg">
+            {t('nav.settings')}
+          </Link>
+        </div>
+        <button
+          type="button"
+          onClick={() => queryClient.invalidateQueries({ queryKey: ['memories'] })}
+          className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg hover:border-accent"
+        >
+          {t('runs.refresh')}
+        </button>
+      </div>
+
+      <section className="rounded-lg border border-border bg-surface p-4">
+        <div className="mb-2 text-sm font-medium text-fg">{t('memories.newManual')}</div>
+        <div className="grid gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs text-muted">{t('memories.role')}</label>
+            <select
+              value={newRole}
+              onChange={(e) => setNewRole(e.target.value as typeof newRole)}
+              className="rounded-md border border-border bg-bg px-2 py-1 text-xs text-fg outline-none focus:border-accent"
+            >
+              <option value="global">global</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="mof_expert">mof_expert</option>
+              <option value="tio2_expert">tio2_expert</option>
+            </select>
+          </div>
+          <textarea
+            value={newContent}
+            onChange={(e) => setNewContent(e.target.value)}
+            placeholder={t('memories.newPlaceholder')}
+            className="min-h-24 w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus:border-accent"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={!newContent.trim() || createMutation.isPending}
+              onClick={() => createMutation.mutate()}
+              className="rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg hover:border-accent disabled:opacity-50"
+            >
+              {createMutation.isPending ? t('common.loading') : t('common.save')}
+            </button>
+            {createMutation.error ? (
+              <div className="text-sm text-danger">
+                {t('common.error')}: {(createMutation.error as Error).message}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-surface p-4">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-medium text-fg">{t('memories.list')}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder={t('common.searchPlaceholder')}
+              className="w-60 rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus:border-accent"
+            />
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value as RoleFilter)}
+              className="rounded-md border border-border bg-bg px-2 py-2 text-xs text-fg outline-none focus:border-accent"
+              title={t('memories.role')}
+            >
+              <option value="all">{t('memories.all')}</option>
+              <option value="global">global</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="mof_expert">mof_expert</option>
+              <option value="tio2_expert">tio2_expert</option>
+            </select>
+            <select
+              value={status}
+              onChange={(e) => setStatus(e.target.value as StatusFilter)}
+              className="rounded-md border border-border bg-bg px-2 py-2 text-xs text-fg outline-none focus:border-accent"
+              title={t('memories.status')}
+            >
+              <option value="active">active</option>
+              <option value="archived">archived</option>
+              <option value="all">{t('memories.all')}</option>
+            </select>
+            <select
+              value={type}
+              onChange={(e) => setType(e.target.value as TypeFilter)}
+              className="rounded-md border border-border bg-bg px-2 py-2 text-xs text-fg outline-none focus:border-accent"
+              title={t('memories.type')}
+            >
+              <option value="all">{t('memories.all')}</option>
+              <option value="reasoningbank_item">reasoningbank_item</option>
+              <option value="manual_note">manual_note</option>
+            </select>
+          </div>
+        </div>
+
+        {memoriesQuery.isLoading ? (
+          <div className="text-sm text-muted">{t('common.loading')}</div>
+        ) : memoriesQuery.error ? (
+          <div className="text-sm text-danger">
+            {t('common.error')}: {(memoriesQuery.error as ApiError).message}
+          </div>
+        ) : items.length === 0 ? (
+          <div className="text-sm text-muted">{t('common.noMatches')}</div>
+        ) : (
+          <div className="grid gap-2">
+            {items.map((m) => (
+              <Link
+                key={m.mem_id}
+                to={`/memories/${encodeURIComponent(m.mem_id)}`}
+                className="rounded-md border border-border bg-bg px-3 py-2 hover:border-accent"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="truncate font-mono text-xs text-fg">mem:{m.mem_id}</div>
+                      <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+                        {m.role}
+                      </span>
+                      <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+                        {m.type}
+                      </span>
+                      <span
+                        className={`rounded-full border px-2 py-0.5 text-[11px] ${
+                          m.status === 'active'
+                            ? 'border-success text-success'
+                            : 'border-warn text-warn'
+                        }`}
+                      >
+                        {m.status}
+                      </span>
+                      {typeof m.distance === 'number' ? (
+                        <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+                          d={m.distance.toFixed(3)}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 text-xs text-muted">{snippet(m.content, 220) || '—'}</div>
+                    <div className="mt-1 text-[11px] text-muted">
+                      {t('run.createdAt')}: {formatTs(m.created_at)} · {t('common.updatedAt')}: {formatTs(m.updated_at)}
+                    </div>
+                  </div>
+                  {m.source_run_id ? (
+                    <div className="text-[11px] text-muted">
+                      run:{' '}
+                      <span className="font-mono text-fg">{m.source_run_id}</span>
+                    </div>
+                  ) : null}
+                </div>
+              </Link>
+            ))}
+
+            <div className="mt-2">
+              <button
+                type="button"
+                disabled={!memoriesQuery.hasNextPage || memoriesQuery.isFetchingNextPage}
+                onClick={() => memoriesQuery.fetchNextPage()}
+                className="w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg hover:border-accent disabled:opacity-50"
+              >
+                {memoriesQuery.isFetchingNextPage ? t('common.loading') : t('common.loadMore')}
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+

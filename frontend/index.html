@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C2XC-Agent</title>
+    <script>
+      ;(() => {
+        const savedTheme = localStorage.getItem('c2xc_theme')
+        if (savedTheme === 'light' || savedTheme === 'dark') {
+          document.documentElement.dataset.theme = savedTheme
+        } else {
+          document.documentElement.dataset.theme = 'light'
+        }
+
+        const savedLang = localStorage.getItem('c2xc_lang')
+        if (savedLang === 'en' || savedLang === 'zh') {
+          document.documentElement.dataset.lang = savedLang
+        } else {
+          document.documentElement.dataset.lang = 'en'
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
