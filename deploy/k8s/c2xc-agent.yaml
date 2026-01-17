@@ -156,6 +156,8 @@ spec:
           volumeMounts:
             - name: c2xc-agent-backend-data
               mountPath: /app/data
+            - name: tmp-data
+              mountPath: /tmp
 
           readinessProbe:
             httpGet:
@@ -227,5 +229,7 @@ spec:
         - name: nginx-cache
           emptyDir: {}
         - name: nginx-run
+          emptyDir: {}
+        - name: tmp-data
           emptyDir: {}
 
