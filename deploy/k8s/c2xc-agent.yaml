@@ -66,13 +66,13 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           volumeMounts:
-            - name: c2xc-data
+            - name: c2xc-agent-backend-data
               mountPath: /app/data
 
       containers:
         - name: backend
-          image: c2xc-agent-backend:__TAG__
-          imagePullPolicy: IfNotPresent
+          image: c2xc-agent-backend:v0.2
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8000
@@ -147,16 +147,8 @@ spec:
               value: "/tmp/.cache"
 
           volumeMounts:
-            - name: c2xc-data
+            - name: c2xc-agent-backend-data
               mountPath: /app/data
-            - name: tmp
-              mountPath: /tmp
-            - name: c2xc-kb-principles
-              mountPath: /app/kb/kb_principles
-              readOnly: true
-            - name: c2xc-kb-modulation
-              mountPath: /app/kb/kb_modulation
-              readOnly: true
 
           readinessProbe:
             httpGet:
@@ -193,8 +185,8 @@ spec:
               drop: ["ALL"]
 
         - name: frontend
-          image: c2xc-agent-frontend:__TAG__
-          imagePullPolicy: IfNotPresent
+          image: c2xc-agent-frontend:v0.2
+          imagePullPolicy: Always
           ports:
             - name: http-web
               containerPort: 80
