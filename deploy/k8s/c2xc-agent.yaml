@@ -118,7 +118,7 @@ spec:
               value: "qwen-plus"
             # Optional (provider-specific): enable hybrid-thinking for Qwen via compatible gateways.
             - name: C2XC_LLM_ENABLE_THINKING
-              value: "0"
+              value: "1"
 
             # --- Embeddings (OpenAI-compatible; can differ from chat gateway)
             - name: C2XC_EMBEDDING_API_BASE
