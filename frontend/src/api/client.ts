@@ -14,7 +14,8 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api/v1'
+const API_BASE =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? `${import.meta.env.BASE_URL}api/v1`
 
 function joinPath(base: string, path: string): string {
   const b = base.endsWith('/') ? base.slice(0, -1) : base
@@ -73,4 +74,3 @@ export async function apiFetch<T>(
 
   return (json ?? null) as T
 }
-

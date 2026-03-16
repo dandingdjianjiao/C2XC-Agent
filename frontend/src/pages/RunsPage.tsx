@@ -1,12 +1,13 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import { cancelBatch, createBatch, hideBatch, listBatches, listRuns } from '../api/c2xc'
+import { cancelBatch, createBatch, getRunOutput, hideBatch, listBatches, listRuns } from '../api/c2xc'
 import type { CreateBatchRequest, RunListItem } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { DependencyUnavailablePanel } from '../components/DependencyUnavailablePanel'
 import { useT } from '../i18n/i18n'
+import { getRunTitleFromRecipesJson } from '../utils/runTitle'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -57,6 +58,21 @@ function StatusBadge(props: { status: string }) {
   )
 }
 
+function RunTitle(props: { run: RunListItem }) {
+  const outputQuery = useQuery({
+    queryKey: ['runTitle', props.run.run_id],
+    queryFn: () => getRunOutput(props.run.run_id),
+    enabled: props.run.status === 'completed',
+    refetchInterval: (query) => {
+      const err = query.state.error as ApiError | null
+      return props.run.status === 'completed' && !query.state.data && err?.code === 'not_found' ? 1500 : false
+    },
+  })
+
+  const title = getRunTitleFromRecipesJson(outputQuery.data?.recipes_json)
+  return <div className="text-sm text-fg">{title || props.run.run_id}</div>
+}
+
 function RunsInline(props: { batchId: string }) {
   const t = useT()
   const runsQuery = useInfiniteQuery({
@@ -95,9 +111,11 @@ function RunsInline(props: { batchId: string }) {
         >
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={r.status} />
-            <div className="text-sm font-mono text-fg">{r.run_id}</div>
-            <div className="text-xs text-muted">
-              #{r.run_index} · {formatTs(r.created_at)}
+            <div>
+              <RunTitle run={r} />
+              <div className="text-xs text-muted">
+                #{r.run_index} · {formatTs(r.created_at)} · <span className="font-mono">{r.run_id}</span>
+              </div>
             </div>
           </div>
           <Link
