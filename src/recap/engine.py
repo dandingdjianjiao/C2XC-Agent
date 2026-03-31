@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from src.runtime.recipe_identity import canonical_recipe_key, recipe_brief
 from src.storage.reasoningbank_store import MemoryItem
 from src.tools.citation_aliases import (
     AliasedKBChunk,
@@ -24,6 +25,13 @@ from .state import RecapState
 
 class RecapError(RuntimeError):
     pass
+
+
+class _DuplicateReplanRequired(RuntimeError):
+    def __init__(self, *, observation: str, collisions: list[dict[str, Any]]) -> None:
+        super().__init__(observation)
+        self.observation = observation
+        self.collisions = collisions
 
 
 def _now_ts() -> float:
@@ -537,6 +545,16 @@ class _RuntimeState:
     # Strict acceptance records for expert deliverables (role -> acceptance_record_v1).
     acceptance_by_role: dict[str, dict[str, Any]]
 
+    # Global exact no-repeat history (first patch: derived from completed final_output events).
+    global_blocked_recipe_keys: set[str]
+    global_blocked_recipe_previews: dict[str, str]
+
+    # Duplicate collision handling: if final generation collides with blocked exact history,
+    # the planner must first do upstream replanning/evidence work before generate_recipes again.
+    duplicate_replan_pending: bool
+    duplicate_replan_attempts: int
+    duplicate_replan_progress_count: int
+
 
 def _merge_focus_kb_aliases(rt: _RuntimeState, aliases: list[str]) -> None:
     for a in aliases:
@@ -610,6 +628,42 @@ class RecapEngine:
 
         root = Node(task_name="Generate catalyst recipe recommendations.", role="orchestrator")
 
+        def _build_global_recipe_blocklist() -> tuple[set[str], dict[str, str]]:
+            blocked: set[str] = set()
+            previews: dict[str, str] = {}
+            for item in ctx.store.list_completed_run_final_outputs(exclude_run_id=ctx.run_id):
+                payload = item.get("payload")
+                recipes_any = (
+                    (payload.get("recipes_json") or {}).get("recipes")
+                    if isinstance(payload, dict) and isinstance(payload.get("recipes_json"), dict)
+                    else None
+                )
+                recipes = recipes_any if isinstance(recipes_any, list) else []
+                for idx, recipe in enumerate(recipes, start=1):
+                    if not isinstance(recipe, dict):
+                        continue
+                    key = canonical_recipe_key(recipe)
+                    blocked.add(key)
+                    previews.setdefault(
+                        key,
+                        (
+                            f"historical run={item.get('run_id')} batch={item.get('batch_id')} "
+                            f"recipe[{idx}] {recipe_brief(recipe)}"
+                        ),
+                    )
+            return blocked, previews
+
+        global_blocked_recipe_keys, global_blocked_recipe_previews = _build_global_recipe_blocklist()
+        ctx.trace(
+            "recipe_history_loaded",
+            {
+                "ts": _now_ts(),
+                "agent": "orchestrator",
+                "run_id": ctx.run_id,
+                "blocked_recipe_key_count": len(global_blocked_recipe_keys),
+            },
+        )
+
         # Shared conversation history (system is supplied per call).
         history: list[dict[str, Any]] = []
         history.append(
@@ -619,6 +673,8 @@ class RecapEngine:
                     "User request:\n"
                     f"{user_request}\n\n"
                     f"recipes_per_run={ctx.recipes_per_run}\n"
+                    "Hard policy: exact duplicates against historical accepted recipes are forbidden.\n"
+                    f"Current blocked exact recipe key count: {len(global_blocked_recipe_keys)}\n"
                     "You must retrieve evidence before generate_recipes "
                     "(kb_search for literature and/or mem_search for memories and/or PubChem evidence when relevant)."
                 ),
@@ -658,7 +714,26 @@ class RecapEngine:
             mem_focus_seen=set(),
             last_mem_search_ids=[],
             acceptance_by_role={},
+            global_blocked_recipe_keys=global_blocked_recipe_keys,
+            global_blocked_recipe_previews=global_blocked_recipe_previews,
+            duplicate_replan_pending=False,
+            duplicate_replan_attempts=0,
+            duplicate_replan_progress_count=0,
         )
+
+        def _mark_duplicate_replan_progress(*, action_type: str) -> None:
+            if not rt.duplicate_replan_pending:
+                return
+            rt.duplicate_replan_progress_count += 1
+            ctx.trace(
+                "duplicate_replan_progress",
+                {
+                    "ts": _now_ts(),
+                    "agent": rt.node_ptr.role,
+                    "action_type": action_type,
+                    "progress_count": rt.duplicate_replan_progress_count,
+                },
+            )
 
         def _pubchem_request_key(
             *,
@@ -969,6 +1044,66 @@ class RecapEngine:
                     f"Archived: {archived}"
                 )
 
+            collisions: list[dict[str, Any]] = []
+            seen_output_keys: dict[str, int] = {}
+            for idx, recipe in enumerate(recipes, start=1):
+                if not isinstance(recipe, dict):
+                    continue
+                key = canonical_recipe_key(recipe)
+                prior_idx = seen_output_keys.get(key)
+                if prior_idx is not None:
+                    collisions.append(
+                        {
+                            "kind": "within_output",
+                            "recipe_index": idx,
+                            "previous_recipe_index": prior_idx,
+                            "key": key,
+                            "summary": recipe_brief(recipe),
+                        }
+                    )
+                else:
+                    seen_output_keys[key] = idx
+
+                if key in rt.global_blocked_recipe_keys:
+                    collisions.append(
+                        {
+                            "kind": "historical_exact",
+                            "recipe_index": idx,
+                            "key": key,
+                            "summary": recipe_brief(recipe),
+                            "historical_preview": rt.global_blocked_recipe_previews.get(key, ""),
+                        }
+                    )
+
+            if collisions:
+                lines: list[str] = []
+                lines.append("DUPLICATE REPLAN REQUIRED")
+                lines.append("")
+                lines.append("Your latest final recipe set contains forbidden exact duplicates.")
+                lines.append("This is not a format error and must not be repaired by only patching the final JSON.")
+                lines.append("")
+                lines.append("Collision details:")
+                for col in collisions:
+                    if str(col.get("kind")) == "within_output":
+                        lines.append(
+                            f"- recipe[{col.get('recipe_index')}] duplicates recipe[{col.get('previous_recipe_index')}] "
+                            f"within the same output. key={col.get('key')}. {col.get('summary')}"
+                        )
+                    else:
+                        hist = str(col.get("historical_preview") or "").strip()
+                        suffix = f" Historical match: {hist}" if hist else ""
+                        lines.append(
+                            f"- recipe[{col.get('recipe_index')}] matches a historical accepted recipe exactly. "
+                            f"key={col.get('key')}. {col.get('summary')}{suffix}"
+                        )
+                lines.append("")
+                lines.append("Required recovery path:")
+                lines.append("1. Return to upstream planning instead of directly patching the final JSON.")
+                lines.append("2. Identify a materially different lever or mechanism from the collided recipes.")
+                lines.append("3. Gather or reopen supporting evidence through upstream actions.")
+                lines.append("4. Only then call generate_recipes again.")
+                raise _DuplicateReplanRequired(observation="\n".join(lines).strip(), collisions=collisions)
+
             return citations, resolved_mem_ids, used_aliases, mem_tokens
 
         while True:
@@ -1275,6 +1410,29 @@ class RecapEngine:
                     rt.state = RecapState.ACTION_TAKEN
                     continue
 
+                if rt.duplicate_replan_pending and rt.duplicate_replan_progress_count < 1:
+                    rt.latest_obs = (
+                        "ERROR: generate_recipes is blocked after a duplicate collision.\n"
+                        "You must first perform at least one upstream replanning or evidence-related action "
+                        "(for example: task, kb_search, kb_get, kb_list, mem_search, mem_get, mem_list, pubchem) "
+                        "before calling generate_recipes again."
+                    )
+                    rt.remaining_subtasks = info.subtasks[1:]
+                    rt.state = RecapState.ACTION_TAKEN
+                    continue
+
+                if rt.duplicate_replan_pending:
+                    ctx.trace(
+                        "duplicate_replan_resumed",
+                        {
+                            "ts": _now_ts(),
+                            "agent": rt.node_ptr.role,
+                            "progress_count": rt.duplicate_replan_progress_count,
+                        },
+                    )
+                    rt.duplicate_replan_pending = False
+                    rt.duplicate_replan_progress_count = 0
+
                 # Strict gating: do not generate recipes until both experts have passed acceptance.
                 missing_roles: list[str] = []
                 for required in ("tio2_expert", "mof_expert"):
@@ -1558,6 +1716,7 @@ class RecapEngine:
 
                 gen_history: list[dict[str, Any]] = list(history) + [{"role": "user", "content": gen_prompt}]
                 format_errors = 0
+                duplicate_replan_observation: str | None = None
 
                 for turn in range(1, 21):
                     ctx.check_cancelled()
@@ -2125,6 +2284,29 @@ class RecapEngine:
                             parsed,
                             context="generate_recipes.final",
                         )
+                    except _DuplicateReplanRequired as e:
+                        max_duplicate_replans = 1
+                        ctx.trace(
+                            "duplicate_replan_requested",
+                            {
+                                "ts": _now_ts(),
+                                "agent": "orchestrator",
+                                "run_id": ctx.run_id,
+                                "attempt": rt.duplicate_replan_attempts + 1,
+                                "max_attempts": max_duplicate_replans,
+                                "collisions": e.collisions,
+                            },
+                        )
+                        if rt.duplicate_replan_attempts >= max_duplicate_replans:
+                            raise RecapError(
+                                "constraint_violation: exact duplicate recipes persisted after duplicate replan. "
+                                "See duplicate_replan_requested trace events for collision details."
+                            )
+                        rt.duplicate_replan_attempts += 1
+                        rt.duplicate_replan_pending = True
+                        rt.duplicate_replan_progress_count = 0
+                        duplicate_replan_observation = e.observation
+                        break
                     except RecapError as e:
                         gen_history.append(
                             {
@@ -2137,6 +2319,9 @@ class RecapEngine:
                             }
                         )
                         continue
+
+                    if duplicate_replan_observation is not None:
+                        break
 
                     ctx.trace(
                         "citations_resolved",
@@ -2168,6 +2353,12 @@ class RecapEngine:
                         },
                     )
                     return parsed, citations, resolved_mem_ids
+
+                if duplicate_replan_observation is not None:
+                    rt.latest_obs = duplicate_replan_observation
+                    rt.remaining_subtasks = info.subtasks[1:]
+                    rt.state = RecapState.ACTION_TAKEN
+                    continue
 
                 raise RecapError("generate_recipes exceeded maximum turns without producing a valid final output.")
 
@@ -2269,6 +2460,7 @@ class RecapEngine:
                     },
                 )
 
+                _mark_duplicate_replan_progress(action_type="kb_search")
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
                 continue
@@ -2300,6 +2492,7 @@ class RecapEngine:
                             "lightrag_chunk_id": stored.lightrag_chunk_id,
                         },
                     )
+                    _mark_duplicate_replan_progress(action_type="kb_get")
 
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
@@ -2342,6 +2535,7 @@ class RecapEngine:
                     },
                 )
 
+                _mark_duplicate_replan_progress(action_type="kb_list")
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
                 continue
@@ -2481,6 +2675,7 @@ class RecapEngine:
                     },
                 )
 
+                _mark_duplicate_replan_progress(action_type="mem_search")
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
                 continue
@@ -2515,6 +2710,7 @@ class RecapEngine:
                             "source_run_id": stored.source_run_id,
                         },
                     )
+                    _mark_duplicate_replan_progress(action_type="mem_get")
 
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
@@ -2560,6 +2756,7 @@ class RecapEngine:
                     },
                 )
 
+                _mark_duplicate_replan_progress(action_type="mem_list")
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
                 continue
@@ -2599,6 +2796,7 @@ class RecapEngine:
                         + "\n\n"
                         f"{item.get('content')}\n"
                     ).strip()
+                    _mark_duplicate_replan_progress(action_type="pubchem")
                     rt.remaining_subtasks = info.subtasks[1:]
                     rt.state = RecapState.ACTION_TAKEN
                     continue
@@ -2622,6 +2820,7 @@ class RecapEngine:
                     f"{item.get('content')}\n"
                 ).strip()
 
+                _mark_duplicate_replan_progress(action_type="pubchem")
                 rt.remaining_subtasks = info.subtasks[1:]
                 rt.state = RecapState.ACTION_TAKEN
                 continue
@@ -2640,6 +2839,7 @@ class RecapEngine:
 
                 child = Node(task_name=task, role=role, parent=rt.node_ptr)
                 rt.node_ptr.add_child(child)
+                _mark_duplicate_replan_progress(action_type="task")
                 rt.node_ptr = child
                 rt.depth += 1
                 rt.state = RecapState.DOWN

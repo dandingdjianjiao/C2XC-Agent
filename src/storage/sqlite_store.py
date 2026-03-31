@@ -720,6 +720,65 @@ class SQLiteStore:
             (batch_id,),
         ).fetchall()
 
+    def list_completed_run_final_outputs(self, *, exclude_run_id: str | None = None) -> list[dict[str, Any]]:
+        """Return latest final_output payloads for completed non-dry-run runs.
+
+        This intentionally reuses the existing event log instead of introducing a
+        new recommendation-history table in the first patch.
+        """
+        where = ["r.status = 'completed'"]
+        params: list[Any] = []
+        excluded = (exclude_run_id or "").strip()
+        if excluded:
+            where.append("r.run_id != ?")
+            params.append(excluded)
+
+        rows = self._conn.execute(
+            f"""
+            SELECT
+              r.run_id, r.batch_id, r.run_index, r.created_at, r.ended_at,
+              b.config_json
+            FROM runs r
+            JOIN batches b ON b.batch_id = r.batch_id
+            WHERE {' AND '.join(where)}
+            ORDER BY COALESCE(r.ended_at, r.created_at) DESC, r.run_id DESC;
+            """,
+            params,
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                config_snapshot = json.loads(str(row["config_json"] or "{}"))
+            except Exception:
+                config_snapshot = {}
+            if bool(config_snapshot.get("dry_run", False)):
+                continue
+
+            out_row = self.get_latest_event(run_id=str(row["run_id"]), event_type="final_output")
+            if out_row is None:
+                continue
+
+            try:
+                payload = json.loads(str(out_row["payload_json"] or "{}"))
+            except Exception:
+                continue
+
+            items.append(
+                {
+                    "run_id": str(row["run_id"]),
+                    "batch_id": str(row["batch_id"]),
+                    "run_index": int(row["run_index"]),
+                    "created_at": float(row["created_at"]),
+                    "ended_at": float(row["ended_at"]) if row["ended_at"] is not None else None,
+                    "config_snapshot": config_snapshot,
+                    "final_output_event_id": str(out_row["event_id"]),
+                    "payload": payload,
+                }
+            )
+
+        return items
+
     def create_batch(
         self,
         *,
