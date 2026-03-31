@@ -25,6 +25,7 @@ import { Markdown } from '../components/Markdown'
 import { RichTextViewer } from '../components/RichTextViewer'
 import { TextViewer } from '../components/TextViewer'
 import { useT } from '../i18n/i18n'
+import { getRunTitleFromRecipesJson } from '../utils/runTitle'
 
 function formatTs(ts: number | null): string {
   if (!ts) return '—'
@@ -211,6 +212,7 @@ export function RunDetailPage() {
       return false
     },
   })
+  const runTitle = getRunTitleFromRecipesJson(outputQuery.data?.recipes_json) ?? runId
 
   const resolveModifierChecksMutation = useMutation({
     mutationFn: () => resolveRunModifierChecks(runId),
@@ -381,7 +383,10 @@ export function RunDetailPage() {
           >
             {t('nav.back')}
           </Link>
-          <div className="font-mono text-sm">{runId}</div>
+          <div>
+            <div className="text-sm text-fg">{runTitle}</div>
+            {runTitle !== runId ? <div className="font-mono text-xs text-muted">{runId}</div> : null}
+          </div>
           {runQuery.data?.run?.status ? <StatusBadge status={runQuery.data.run.status} /> : null}
         </div>
 

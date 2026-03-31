@@ -8,9 +8,15 @@ import { RunsPage } from './pages/RunsPage.tsx'
 import { SettingsProductsPage } from './pages/SettingsProductsPage.tsx'
 import { SettingsPresetsPage } from './pages/SettingsPresetsPage.tsx'
 
+function _routerBasename(): string {
+  const rawBase = import.meta.env.BASE_URL || '/'
+  if (rawBase === '/') return '/'
+  return rawBase.endsWith('/') ? rawBase.slice(0, -1) : rawBase
+}
+
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={_routerBasename()}>
       <AppShell>
         <Routes>
           <Route path="/" element={<RunsPage />} />
